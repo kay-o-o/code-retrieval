@@ -1,0 +1,121 @@
+{
+  "tasks": [
+    {
+      "id": "T01",
+      "question": "这个项目支持哪几种 approval 模式？只列出名称。",
+      "must": [
+        [
+          "ask"
+        ],
+        [
+          "auto"
+        ],
+        [
+          "never"
+        ]
+      ],
+      "note": "单跳，grep approval 即可"
+    },
+    {
+      "id": "T02",
+      "question": "哪个函数负责在工作区里执行 shell 命令？",
+      "must": [
+        [
+          "run_shell"
+        ]
+      ],
+      "note": "单跳，工具名"
+    },
+    {
+      "id": "T03",
+      "question": "会话记录文件保存在哪个目录下？",
+      "must": [
+        [
+          "sessions"
+        ]
+      ],
+      "note": "单跳，路径常量"
+    },
+    {
+      "id": "T04",
+      "question": "--max-steps 这个参数的默认值是多少？只需要回答数字。",
+      "must": [
+        [
+          "6"
+        ]
+      ],
+      "note": "单跳，argparse"
+    },
+    {
+      "id": "T05",
+      "question": "prompt 为什么要把固定前缀和每次变化的内容分开？",
+      "must": [
+        [
+          "缓存",
+          "cache",
+          "复用",
+          "reuse"
+        ]
+      ],
+      "note": "需理解设计意图，非字面匹配"
+    },
+    {
+      "id": "T06",
+      "question": "read_file 这个工具一次最多读多少行？",
+      "must": [
+        [
+          "200"
+        ]
+      ],
+      "note": "单跳，schema 默认值"
+    },
+    {
+      "id": "T07",
+      "question": "delegate 子智能体的层数是用哪个参数控制的？",
+      "must": [
+        [
+          "max_depth"
+        ]
+      ],
+      "note": "单跳，变量名"
+    },
+    {
+      "id": "T08",
+      "question": "工具返回的内容超过多少字符就会被截断？",
+      "must": [
+        [
+          "4000",
+          "4,000"
+        ]
+      ],
+      "note": "单跳，常量"
+    },
+    {
+      "id": "T09",
+      "question": "这个项目依赖哪些第三方 Python 库？",
+      "must": [
+        [
+          "标准库",
+          "stdlib",
+          "无",
+          "零",
+          "none"
+        ]
+      ],
+      "note": "需要看 import 后归纳，不是搜字符串"
+    },
+    {
+      "id": "T10",
+      "question": "如果模型返回的格式不符合要求，代码会怎么处理？",
+      "must": [
+        [
+          "retry",
+          "重试",
+          "再次",
+          "重新"
+        ]
+      ],
+      "note": "多跳，parse 与 ask 的 retry 分支"
+    }
+  ]
+}

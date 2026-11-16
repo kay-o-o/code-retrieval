@@ -1,0 +1,236 @@
+{
+  "provider": "openai",
+  "max_steps": 6,
+  "summary": {
+    "total": 10,
+    "passed": 10,
+    "success_rate": 1.0,
+    "avg_steps": 5.0,
+    "avg_tokens": 12658.5,
+    "avg_latency_s": 9.48
+  },
+  "results": [
+    {
+      "id": "T01",
+      "question": "这个项目支持哪几种 approval 模式？只列出名称。",
+      "note": "单跳，grep approval 即可",
+      "passed": true,
+      "hits": [
+        "ask",
+        "auto",
+        "never"
+      ],
+      "steps": 3,
+      "tools": [
+        "search",
+        "search",
+        "read_file"
+      ],
+      "prompt_tokens": 7611,
+      "completion_tokens": 292,
+      "latency_s": 6.1,
+      "answer": "`ask`、`auto`、`never`",
+      "error": ""
+    },
+    {
+      "id": "T02",
+      "question": "哪个函数负责在工作区里执行 shell 命令？",
+      "note": "单跳，工具名",
+      "passed": true,
+      "hits": [
+        "run_shell"
+      ],
+      "steps": 2,
+      "tools": [
+        "search",
+        "read_file"
+      ],
+      "prompt_tokens": 7232,
+      "completion_tokens": 425,
+      "latency_s": 4.9,
+      "answer": "负责在工作区里执行 shell 命令的函数是 `mini_coding_agent.py` 中的 `tool_run_shell`（第 1094 行起）。\n\n- 工具注册名：`\"run_shell\"`（`risky: True`，需要审批），指向 `self.tool_run_shell`（第 442-447 行）。\n- 实现要点：校验 `command` 非空、`timeout` 在 [1, 120] 范围内，然后用 `subprocess.run(command, cwd=self.root, shell=True, capture_output=True, text=True, timeout=timeout)` 在仓库根目录执行并捕获输出。",
+      "error": ""
+    },
+    {
+      "id": "T03",
+      "question": "会话记录文件保存在哪个目录下？",
+      "note": "单跳，路径常量",
+      "passed": true,
+      "hits": [
+        "sessions"
+      ],
+      "steps": 5,
+      "tools": [
+        "search",
+        "search",
+        "search",
+        "read_file",
+        "run_shell"
+      ],
+      "prompt_tokens": 11225,
+      "completion_tokens": 719,
+      "latency_s": 8.9,
+      "answer": "会话记录（session）保存在仓库根目录下的 `.mini-coding-agent/sessions/` 目录中，每个会话一个 JSON 文件，文件名为 `<session_id>.json`。\n\n依据 `mini_coding_agent.py`：\n\n- `build_agent()`（约 1251 行）：`store = SessionStore(Path(workspace.repo_root) / \".mini-coding-agent\" / \"sessions\")`\n- `SessionStore`（182–200 行）：\n  - `path(session_id)` → `self.root / f\"{session_id}.json\"`\n  - `save()` 将 `json.dumps(session, indent=2)` 写入该路径\n  - `latest()` 按 `st_mtime` 取最新 `*.json` 的 stem，用于 `--resume latest`\n\n所以实际落盘位置例如：`D:\\agent-projects\\mini-coding-agent\\.mini-coding-agent\\sessions\\<session_id>.json`（与仓库状态里的未跟踪目录 `.mini-coding-agent/` 对应）。",
+      "error": ""
+    },
+    {
+      "id": "T04",
+      "question": "--max-steps 这个参数的默认值是多少？只需要回答数字。",
+      "note": "单跳，argparse",
+      "passed": true,
+      "hits": [
+        "6"
+      ],
+      "steps": 6,
+      "tools": [
+        "search",
+        "search",
+        "search",
+        "search",
+        "run_shell",
+        "search"
+      ],
+      "prompt_tokens": 15080,
+      "completion_tokens": 534,
+      "latency_s": 8.0,
+      "answer": "<final>6</final>",
+      "error": ""
+    },
+    {
+      "id": "T05",
+      "question": "prompt 为什么要把固定前缀和每次变化的内容分开？",
+      "note": "需理解设计意图，非字面匹配",
+      "passed": true,
+      "hits": [
+        "缓存"
+      ],
+      "steps": 6,
+      "tools": [
+        "search",
+        "run_shell",
+        "read_file",
+        "search",
+        "read_file",
+        "search"
+      ],
+      "prompt_tokens": 10955,
+      "completion_tokens": 1126,
+      "latency_s": 12.5,
+      "answer": "<final>把固定前缀和每轮变化的内容分开，核心是为了**复用 KV / prompt cache**，同时让提示结构更稳定。\n\n在这份代码里：\n\n- `build_prefix()` 负责生成稳定部分：工具说明、工具 schema、固定示例、系统规则等。只要这些不变，前缀就逐字节不变。\n- 每轮变化的内容，比如工作区快照、记忆、对话记录、当前用户请求，应该放在前缀之后，作为 turn state 追加。\n\n这样做的好处：\n\n1. **缓存复用**：LLM 推理时会把前缀 token 的 KV cache 存下来。下一轮如果前缀完全一致，就能跳过这部分计算，降低延迟和成本。\n2. **避免缓存失效**：如果把动态内容混进前缀，任何小变化都会让整个前缀变化，导致缓存全部失效，只能从头计算。\n3. **职责清晰**：固定部分描述“代理是谁、有哪些工具、规则是什么”；动态部分描述“这一轮看到了什么、要做什么”。调试和评测时更容易定位问题。\n4. **行为更稳定**：工具定义和示例不会因为每轮状态变化而漂移，模型看到的工具契约更一致。\n\n一句话：**固定前缀是缓存友好的“静态契约”，turn state 是每轮追加的“动态上下文”；分开是为了让前者可复用、后者可变化。**</final>",
+      "error": ""
+    },
+    {
+      "id": "T06",
+      "question": "read_file 这个工具一次最多读多少行？",
+      "note": "单跳，schema 默认值",
+      "passed": true,
+      "hits": [
+        "200"
+      ],
+      "steps": 6,
+      "tools": [
+        "search",
+        "search",
+        "read_file",
+        "search",
+        "read_file",
+        "read_file"
+      ],
+      "prompt_tokens": 15851,
+      "completion_tokens": 869,
+      "latency_s": 10.6,
+      "answer": "<final>`read_file` 默认一次最多读 **200 行**（`end` 默认值为 `200`）。但代码本身没有硬性上限；如果显式传入更大的 `end`，可以读取超过 200 行。</final>",
+      "error": ""
+    },
+    {
+      "id": "T07",
+      "question": "delegate 子智能体的层数是用哪个参数控制的？",
+      "note": "单跳，变量名",
+      "passed": true,
+      "hits": [
+        "max_depth"
+      ],
+      "steps": 6,
+      "tools": [
+        "search",
+        "run_shell",
+        "read_file",
+        "search",
+        "search",
+        "read_file"
+      ],
+      "prompt_tokens": 10284,
+      "completion_tokens": 695,
+      "latency_s": 7.9,
+      "answer": "<final>delegate 子智能体的层数由 `max_depth` 参数控制。\n\n在 `tool_delegate` 中创建子智能体时会传入：\n\n- `depth=self.depth + 1`\n- `max_depth=self.max_depth`\n\n当 `self.depth >= self.max_depth` 时会抛出 `\"delegate depth exceeded\"`，因此 `max_depth` 决定最大委派层级；`max_steps` 控制的是子智能体单次任务的执行步数，不是层数。</final>",
+      "error": ""
+    },
+    {
+      "id": "T08",
+      "question": "工具返回的内容超过多少字符就会被截断？",
+      "note": "单跳，常量",
+      "passed": true,
+      "hits": [
+        "4000"
+      ],
+      "steps": 4,
+      "tools": [
+        "search",
+        "search",
+        "search",
+        "read_file"
+      ],
+      "prompt_tokens": 11851,
+      "completion_tokens": 656,
+      "latency_s": 7.4,
+      "answer": "工具输出默认超过 **4000 字符**就会被截断。\n\n依据 `mini_coding_agent.py`：\n- 第 43 行：`MAX_TOOL_OUTPUT = 4000`\n- 第 90–94 行：`def clip(text, limit=MAX_TOOL_OUTPUT)`，当 `len(text) > limit` 时返回 `text[:limit]`，并追加 `\"...[truncated N chars]\"`，N 为被截掉的字符数。\n\n注意：记忆/历史拼装等处会显式传入更小的 limit（如 900、180、220），那是 `clip` 的覆盖值，与工具输出的默认上限 4000 无关。",
+      "error": ""
+    },
+    {
+      "id": "T09",
+      "question": "这个项目依赖哪些第三方 Python 库？",
+      "note": "需要看 import 后归纳，不是搜字符串",
+      "passed": true,
+      "hits": [
+        "标准库"
+      ],
+      "steps": 6,
+      "tools": [
+        "read_file",
+        "run_shell",
+        "search",
+        "read_file",
+        "read_file",
+        "search"
+      ],
+      "prompt_tokens": 13916,
+      "completion_tokens": 1476,
+      "latency_s": 13.2,
+      "answer": "<final>根据 `pyproject.toml` 和已读取的源码，第三方依赖如下：\n\n**运行时依赖（`[project].dependencies`）**\n- `pytest>=9.0.2`\n\n**开发依赖（`[dependency-groups].dev`）**\n- `pytest>=8.3.5`\n- `ruff>=0.4.4`\n\n**构建依赖（`[build-system].requires`）**\n- `setuptools>=61.0`\n- `wheel`\n\n**源码导入情况**\n- `mini_coding_agent.py` 只导入了标准库（`argparse`、`json`、`os`、`re`、`shutil`、`subprocess`、`sys`、`urllib`、`uuid`、`datetime`、`pathlib`）以及本地模块 `code_index`。\n- 也就是说，除 `pytest`（测试）和 `ruff`（lint）外，项目本身没有额外的运行时第三方库。\n\n注意：`code_index.py` 只读到了前 40 行，其余导入未完整确认；但从 `pyproject.toml` 的依赖声明看，不存在其他第三方运行时依赖。</final>",
+      "error": ""
+    },
+    {
+      "id": "T10",
+      "question": "如果模型返回的格式不符合要求，代码会怎么处理？",
+      "note": "多跳，parse 与 ask 的 retry 分支",
+      "passed": true,
+      "hits": [
+        "重试"
+      ],
+      "steps": 6,
+      "tools": [
+        "run_shell",
+        "search",
+        "search",
+        "search",
+        "search",
+        "read_file"
+      ],
+      "prompt_tokens": 14173,
+      "completion_tokens": 1615,
+      "latency_s": 15.3,
+      "answer": "<final>代码不会直接崩溃，而是把“格式不符合要求”当成一次 malformed response 处理：\n\n1. 模型输出会先按约定格式解析：\n   - 工具调用要求是 `<tool ...>...</tool>`；\n   - 最终回答要求是 `<final>...</final>`。\n2. `parse_xml_tool()` 用正则提取 `<tool>`；匹配不到时返回 `None`，即视为没有有效工具调用。\n3. Agent 主循环检查本轮是否得到“有效工具调用”或“最终回答”。如果两者都没有，就计为一次 malformed response，并继续让模型重试。\n4. 如果连续/累计 malformed 次数超过限制，循环停止，并记录、返回：\n   `Stopped after too many malformed model responses without a valid tool call or final answer.`\n5. 如果只是达到步数上限但格式没坏，则返回另一条：\n   `Stopped after reaching the step limit without a final answer.`\n\n相关位置主要在 `mini_coding_agent.py` 的 `parse_xml_tool()` 和主循环约 728 行附近。</final>",
+      "error": ""
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "_note": "Gold is an anchor string, not a line number. The line numbers went stale the first time the source grew and every case silently scored against the wrong place. Anchors are resolved to a line at run time, so the suite survives edits.",
+  "cases": [
+    {
+      "query": "approval 有哪几种模式",
+      "gold": [
+        {"path": "mini_coding_agent.py", "anchor": "choices=(\"ask\", \"auto\", \"never\")"},
+        {"path": "README.md", "anchor": "- `--approval ask`"}
+      ]
+    },
+    {
+      "query": "哪个函数负责在工作区里执行 shell 命令",
+      "gold": [
+        {"path": "mini_coding_agent.py", "anchor": "def tool_run_shell"}
+      ]
+    },
+    {
+      "query": "会话记录文件保存在哪个目录下",
+      "gold": [
+        {"path": "mini_coding_agent.py", "anchor": "/ \".mini-coding-agent\" / \"sessions\")"}
+      ]
+    },
+    {
+      "query": "max-steps 这个参数的默认值是多少",
+      "gold": [
+        {"path": "mini_coding_agent.py", "anchor": "\"--max-steps\", type=int, default=6"}
+      ]
+    },
+    {
+      "query": "read_file 这个工具一次最多读多少行",
+      "gold": [
+        {"path": "mini_coding_agent.py", "anchor": "\"end\": \"int=200\""},
+        {"path": "mini_coding_agent.py", "anchor": "end = int(args.get(\"end\", 200))"}
+      ]
+    },
+    {
+      "query": "delegate 子智能体的层数由哪个参数控制",
+      "gold": [
+        {"path": "mini_coding_agent.py", "anchor": "self.max_depth = max_depth"}
+      ]
+    },
+    {
+      "query": "工具返回的内容超过多少字符就会被截断",
+      "gold": [
+        {"path": "mini_coding_agent.py", "anchor": "MAX_TOOL_OUTPUT = 4000"}
+      ]
+    },
+    {
+      "query": "模型返回的格式不符合要求时代码会怎么处理",
+      "gold": [
+        {"path": "mini_coding_agent.py", "anchor": "def retry_notice"},
+        {"path": "mini_coding_agent.py", "anchor": "MiniAgent.retry_notice(\"model returned malformed tool JSON\")"}
+      ]
+    },
+    {
+      "query": "哪个函数负责写文件",
+      "gold": [
+        {"path": "mini_coding_agent.py", "anchor": "def tool_write_file"}
+      ]
+    },
+    {
+      "query": "这个项目依赖哪些第三方库",
+      "gold": [
+        {"path": "README.md", "anchor": "no Python runtime dependency beyond the standard library"}
+      ]
+    },
+    {
+      "query": "prompt 为什么要把固定前缀和变化的内容分开",
+      "gold": [
+        {"path": "README.md", "anchor": "Prompt shape and cache reuse"},
+        {"path": "mini_coding_agent.py", "anchor": "Prompt Shape And Cache Reuse"}
+      ]
+    }
+  ]
+}

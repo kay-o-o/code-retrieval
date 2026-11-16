@@ -1,0 +1,236 @@
+{
+  "provider": "openai",
+  "max_steps": 6,
+  "summary": {
+    "total": 10,
+    "passed": 7,
+    "success_rate": 0.7,
+    "avg_steps": 5.0,
+    "avg_tokens": 10392.9,
+    "avg_latency_s": 8.59
+  },
+  "results": [
+    {
+      "id": "T01",
+      "question": "这个项目支持哪几种 approval 模式？只列出名称。",
+      "note": "单跳，grep approval 即可",
+      "passed": true,
+      "hits": [
+        "ask",
+        "auto",
+        "never"
+      ],
+      "steps": 3,
+      "tools": [
+        "search",
+        "search",
+        "read_file"
+      ],
+      "prompt_tokens": 6988,
+      "completion_tokens": 373,
+      "latency_s": 4.4,
+      "answer": "支持三种 approval 模式：`ask`、`auto`、`never`（默认 `ask`）。",
+      "error": ""
+    },
+    {
+      "id": "T02",
+      "question": "哪个函数负责在工作区里执行 shell 命令？",
+      "note": "单跳，工具名",
+      "passed": true,
+      "hits": [
+        "run_shell"
+      ],
+      "steps": 4,
+      "tools": [
+        "search",
+        "search",
+        "read_file",
+        "read_file"
+      ],
+      "prompt_tokens": 9849,
+      "completion_tokens": 665,
+      "latency_s": 6.6,
+      "answer": "`tool_run_shell`（`mini_coding_agent.py` 第 977 行）负责在工作区执行 shell 命令。\n\n关键点：\n- 参数：`command`（必填，空则抛 `ValueError`）、`timeout`（默认 20，限制在 1–120 秒）\n- 执行：`subprocess.run(command, cwd=self.root, shell=True, capture_output=True, text=True, timeout=timeout)`\n  - `cwd=self.root` 即工作区根目录\n- 返回：`exit_code`、`stdout`、`stderr` 拼接成的字符串\n- 注册位置：第 405–409 行的工具表 `\"run_shell\": {..., \"run\": self.tool_run_shell}`；第 743 行处还有对应的审批/分发判断",
+      "error": ""
+    },
+    {
+      "id": "T03",
+      "question": "会话记录文件保存在哪个目录下？",
+      "note": "单跳，路径常量",
+      "passed": true,
+      "hits": [
+        "sessions"
+      ],
+      "steps": 6,
+      "tools": [
+        "search",
+        "list_files",
+        "search",
+        "list_files",
+        "search",
+        "search"
+      ],
+      "prompt_tokens": 10980,
+      "completion_tokens": 687,
+      "latency_s": 8.5,
+      "answer": "<final>会话记录文件保存在 `.mini-coding-agent/sessions` 目录下（相对于项目根目录 `D:\\agent-projects\\mini-coding-agent`）。</final>",
+      "error": ""
+    },
+    {
+      "id": "T04",
+      "question": "--max-steps 这个参数的默认值是多少？只需要回答数字。",
+      "note": "单跳，argparse",
+      "passed": true,
+      "hits": [
+        "6"
+      ],
+      "steps": 1,
+      "tools": [
+        "search"
+      ],
+      "prompt_tokens": 4125,
+      "completion_tokens": 80,
+      "latency_s": 1.9,
+      "answer": "6",
+      "error": ""
+    },
+    {
+      "id": "T05",
+      "question": "prompt 为什么要把固定前缀和每次变化的内容分开？",
+      "note": "需理解设计意图，非字面匹配",
+      "passed": true,
+      "hits": [
+        "缓存"
+      ],
+      "steps": 6,
+      "tools": [
+        "search",
+        "search",
+        "list_files",
+        "search",
+        "run_shell",
+        "read_file"
+      ],
+      "prompt_tokens": 10247,
+      "completion_tokens": 1098,
+      "latency_s": 10.9,
+      "answer": "<final>把“固定前缀”和“每次变化的内容”分开，核心是为了让前缀稳定、可复用、可缓存。\n\n主要好处：\n\n1. **利用 prompt / KV cache**\n   - 模型服务通常可以缓存相同前缀的计算结果。\n   - 只要 system prompt、工具说明、仓库快照等固定部分不变，后续轮次就能复用缓存，降低延迟和成本。\n   - 如果把时间戳、随机 ID、当前用户消息混进前缀，前缀每轮都变，缓存基本失效。\n\n2. **行为更稳定**\n   - 固定部分定义“角色、规则、工具、工作区事实”，变化部分只放“本轮任务和状态”。\n   - 模型不容易因为上下文顺序或无关内容变化而漂移。\n\n3. **便于调试和版本管理**\n   - 固定前缀可以单独审查、测试、版本化。\n   - 每轮变化的内容可以单独记录，方便对比“这轮到底新增了什么”。\n   - 出问题时更容易判断是系统提示变了，还是用户输入/工具结果变了。\n\n4. **避免重复计算**\n   - 仓库快照、工具定义、系统规则不需要每轮重新组织或重新推理。\n   - 每轮只追加新的 turn state，例如用户消息、工具调用、工具结果。\n\n5. **结构清晰**\n   - 典型结构是：\n     - 固定前缀：system prompt + 工具定义 + 稳定工作区上下文\n     - 变化部分：用户消息 + 本轮工具结果 + 临时状态\n   -",
+      "error": ""
+    },
+    {
+      "id": "T06",
+      "question": "read_file 这个工具一次最多读多少行？",
+      "note": "单跳，schema 默认值",
+      "passed": false,
+      "hits": [
+        null
+      ],
+      "steps": 6,
+      "tools": [
+        "search",
+        "run_shell",
+        "search",
+        "read_file",
+        "read_file",
+        "search"
+      ],
+      "prompt_tokens": 13604,
+      "completion_tokens": 1281,
+      "latency_s": 17.0,
+      "answer": "（模型在工具额度用尽后没有给出可用回答）",
+      "error": ""
+    },
+    {
+      "id": "T07",
+      "question": "delegate 子智能体的层数是用哪个参数控制的？",
+      "note": "单跳，变量名",
+      "passed": true,
+      "hits": [
+        "max_depth"
+      ],
+      "steps": 6,
+      "tools": [
+        "search",
+        "run_shell",
+        "search",
+        "read_file",
+        "read_file",
+        "read_file"
+      ],
+      "prompt_tokens": 9645,
+      "completion_tokens": 651,
+      "latency_s": 6.7,
+      "answer": "<final>由 `max_depth` 参数控制。代码中通过 `self.depth >= self.max_depth` 判断是否超过委派深度；`max_steps` 控制的是子智能体单次委派的最大步数，不是层数。</final>",
+      "error": ""
+    },
+    {
+      "id": "T08",
+      "question": "工具返回的内容超过多少字符就会被截断？",
+      "note": "单跳，常量",
+      "passed": false,
+      "hits": [
+        null
+      ],
+      "steps": 6,
+      "tools": [
+        "search",
+        "run_shell",
+        "list_files",
+        "search",
+        "run_shell",
+        "read_file"
+      ],
+      "prompt_tokens": 10357,
+      "completion_tokens": 960,
+      "latency_s": 10.0,
+      "answer": "<final>已收集的信息不足以确定具体阈值：`mini_coding_agent.py` 中负责截断工具返回内容的常量/逻辑没有被读到，之前的搜索也未命中相关关键字。缺少的事实是“工具结果截断的具体字符数（常量值）”。</final>",
+      "error": ""
+    },
+    {
+      "id": "T09",
+      "question": "这个项目依赖哪些第三方 Python 库？",
+      "note": "需要看 import 后归纳，不是搜字符串",
+      "passed": true,
+      "hits": [
+        "标准库"
+      ],
+      "steps": 6,
+      "tools": [
+        "read_file",
+        "search",
+        "search",
+        "list_files",
+        "run_shell",
+        "search"
+      ],
+      "prompt_tokens": 8777,
+      "completion_tokens": 734,
+      "latency_s": 7.6,
+      "answer": "<final>根据 `pyproject.toml`，项目的第三方 Python 依赖是：\n\n- 运行依赖：`pytest>=9.0.2`\n- 开发依赖：`pytest>=8.3.5`、`ruff>=0.4.4`\n- 构建依赖：`setuptools>=61.0`、`wheel`\n\n`mini_coding_agent.py` 目前只导入了标准库模块，没有发现其他第三方库。</final>",
+      "error": ""
+    },
+    {
+      "id": "T10",
+      "question": "如果模型返回的格式不符合要求，代码会怎么处理？",
+      "note": "多跳，parse 与 ask 的 retry 分支",
+      "passed": false,
+      "hits": [
+        null
+      ],
+      "steps": 6,
+      "tools": [
+        "run_shell",
+        "search",
+        "read_file",
+        "read_file",
+        "search",
+        "search"
+      ],
+      "prompt_tokens": 11723,
+      "completion_tokens": 1105,
+      "latency_s": 12.3,
+      "answer": "<final>目前收集到的信息不足以确定具体处理方式。缺少的关键事实是：`mini_coding_agent.py` 中解析模型响应的函数，以及 JSON/工具调用格式不合法时对应的 fallback 分支。现有片段只能确认代码有结构化工具、`validate_tool`、`approve` 等机制，但没有看到“模型返回格式不符合要求”时的实际处理逻辑，因此不能准确断言。</final>",
+      "error": ""
+    }
+  ]
+}

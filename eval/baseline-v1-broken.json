@@ -1,0 +1,37 @@
+{
+  "provider": "openai",
+  "max_steps": 6,
+  "summary": {
+    "total": 1,
+    "passed": 1,
+    "success_rate": 1.0,
+    "avg_steps": 6.0,
+    "avg_tokens": 14628.0,
+    "avg_latency_s": 10.6
+  },
+  "results": [
+    {
+      "id": "T06",
+      "question": "read_file 这个工具一次最多读多少行？",
+      "note": "单跳，schema 默认值",
+      "passed": true,
+      "hits": [
+        "200"
+      ],
+      "steps": 6,
+      "tools": [
+        "search",
+        "read_file",
+        "read_file",
+        "read_file",
+        "search",
+        "read_file"
+      ],
+      "prompt_tokens": 13679,
+      "completion_tokens": 949,
+      "latency_s": 10.6,
+      "answer": "<final>`read_file` 默认一次最多读 **200 行**：`start` 默认 1，`end` 默认 200。\n\n但代码里没有硬性上限；如果显式传入更大的 `end`，可以读取超过 200 行。</final>",
+      "error": ""
+    }
+  ]
+}
