@@ -7,9 +7,9 @@ name = "mini-coding-agent-ollama"
 version = "0.1.0"
 description = "Minimal standalone coding agent backed by Ollama"
 requires-python = ">=3.10"
-dependencies = [
-    "pytest>=9.0.2",
-]
+# 运行时不依赖第三方库：检索、融合、HTTP 全部走标准库。
+# 评测与 lint 依赖见下方 dev 组。
+dependencies = []
 
 [project.scripts]
 mini-coding-agent = "mini_coding_agent:main"
@@ -21,4 +21,4 @@ dev = [
 ]
 
 [tool.setuptools]
-py-modules = ["mini_coding_agent"]
+py-modules = ["mini_coding_agent", "code_index"]

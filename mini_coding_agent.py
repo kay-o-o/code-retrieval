@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -9,6 +10,14 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+from code_index import (
+    CodeIndex,
+    SemanticSearchError,
+    format_hits,
+    has_cjk,
+    looks_like_literal,
+)
 
 
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
@@ -32,7 +41,21 @@ HELP_DETAILS = "\n".join(
     ]
 )
 MAX_TOOL_OUTPUT = 4000
+# Semantic search returns several chunks; each costs context, so keep it small.
+SEARCH_TOP_K = 5
 MAX_HISTORY = 12000
+# The closing turn needs room to write prose. Tool-call turns do not, which is
+# why `--max-new-tokens` stays small for them and this floor applies to answers.
+ANSWER_TOKEN_FLOOR = 1024
+ANSWER_MAX_ATTEMPTS = 2
+# Tool-calling models tend to keep calling tools instead of concluding. Once the
+# budget is spent the harness drops the `tools` parameter entirely and says so,
+# which is the only reliable way to force a final answer.
+FORCE_ANSWER_NOTE = (
+    "Tool budget is exhausted. Answer the user now using what you already collected. "
+    "Do not request more tools and do not describe what you would do next. "
+    "If the collected information is not enough, state exactly which fact is missing."
+)
 IGNORED_PATH_NAMES = {".git", ".mini-coding-agent", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
 
 ##############################
@@ -44,6 +67,19 @@ IGNORED_PATH_NAMES = {".git", ".mini-coding-agent", "__pycache__", ".pytest_cach
 # 4) Context Reduction And Output Management -> clip, history_text
 # 5) Transcripts, Memory, And Resumption -> SessionStore, record, note_tool, ask, reset
 # 6) Delegation And Bounded Subagents -> tool_delegate
+
+
+def load_env_file(path):
+    """Read KEY=VALUE pairs into os.environ without adding a dependency."""
+    path = Path(path)
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
 def now():
@@ -184,7 +220,9 @@ class OllamaModelClient:
         self.top_p = top_p
         self.timeout = timeout
 
-    def complete(self, prompt, max_new_tokens):
+    def complete(self, prompt, max_new_tokens, tools=None):
+        # `/api/generate` has no tool-calling channel; `tools` is accepted and
+        # ignored so the shared call sites can stay backend-agnostic.
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -219,7 +257,94 @@ class OllamaModelClient:
 
         if data.get("error"):
             raise RuntimeError(f"Ollama error: {data['error']}")
+        # Complete_answer retries only on truncation, so surface the stop reason.
+        self.last_finish_reason = data.get("done_reason") or "stop"
         return data.get("response", "")
+
+
+class OpenAICompatibleModelClient:
+    """Point the same agent loop at any OpenAI-compatible endpoint.
+
+    Added for this fork: the upstream project only speaks Ollama's
+    `/api/generate`, which pins the agent to small local models that often
+    fail to emit the `<tool>` protocol. The loop itself is backend-agnostic
+    (it takes a prompt and returns text), so the only thing that needs
+    changing is this transport.
+
+    Token usage is recorded in `last_usage` so evaluation runs can report
+    cost per task; upstream had no accounting at all.
+
+    Native tool calling: when `tools` is passed, the endpoint returns
+    structured `tool_calls` instead of asking the model to hand-write
+    `<tool>` tags. The upstream text protocol failed outright on modern
+    models that emit their own tool-call markup, so this path is the
+    default whenever the backend supports it.
+    """
+
+    supports_native_tools = True
+
+    def __init__(self, model, base_url, api_key, temperature, top_p, timeout):
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.temperature = temperature
+        self.top_p = top_p
+        self.timeout = timeout
+        self.last_usage = {}
+        self.total_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        self.last_tool_calls = []
+        self.last_finish_reason = None
+
+    def complete(self, prompt, max_new_tokens, tools=None):
+        self.last_tool_calls = []
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "max_tokens": max_new_tokens,
+            "stream": False,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        request = urllib.request.Request(
+            self.base_url + "/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Model request failed with HTTP {exc.code}: {body[:400]}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                "Could not reach the model endpoint.\n"
+                f"Base URL: {self.base_url}\n"
+                f"Model: {self.model}\n"
+                f"Reason: {exc.reason}"
+            ) from exc
+
+        if data.get("error"):
+            raise RuntimeError(f"Model error: {data['error']}")
+        if not data.get("choices"):
+            raise RuntimeError(f"Model returned no choices: {str(data)[:300]}")
+
+        self.last_usage = data.get("usage", {}) or {}
+        self.total_usage["prompt_tokens"] += int(self.last_usage.get("prompt_tokens", 0) or 0)
+        self.total_usage["completion_tokens"] += int(self.last_usage.get("completion_tokens", 0) or 0)
+        message = data["choices"][0].get("message", {}) or {}
+        self.last_tool_calls = message.get("tool_calls") or []
+        # `length` means the model was cut off mid-output. The caller uses this
+        # to decide whether a shortened answer is worth re-asking for.
+        self.last_finish_reason = data["choices"][0].get("finish_reason")
+        return (message.get("content") or "").strip()
 
 
 class MiniAgent:
@@ -256,6 +381,19 @@ class MiniAgent:
         self.tools = self.build_tools()
         self.prefix = self.build_prefix()
         self.session_path = self.session_store.save(self.session)
+        self._code_index = None
+
+    @property
+    def code_index(self):
+        """Built on first semantic search, not at startup.
+
+        Indexing costs one embedding call per chunk (~10s for this repo), which
+        a session that only greps should not pay for. A failure here must not
+        kill the run either, so the caller degrades to keyword search.
+        """
+        if self._code_index is None:
+            self._code_index = CodeIndex(self.root)
+        return self._code_index
 
     @classmethod
     def from_session(cls, model_client, workspace, session_store, session_id, **kwargs):
@@ -294,9 +432,15 @@ class MiniAgent:
                 "run": self.tool_read_file,
             },
             "search": {
-                "schema": {"pattern": "str", "path": "str='.'"},
+                "schema": {"pattern": "str", "path": "str='.'", "mode": "str='auto'"},
                 "risky": False,
-                "description": "Search the workspace with rg or a simple fallback.",
+                "description": (
+                    "Search the workspace by keyword or by meaning. mode=auto uses "
+                    "exact/regex matching and falls back to semantic ranking when "
+                    "nothing matches, so a question in Chinese can still find an "
+                    "English identifier. Results are path:start-end plus a few "
+                    "numbered lines."
+                ),
                 "run": self.tool_search,
             },
             "run_shell": {
@@ -326,6 +470,39 @@ class MiniAgent:
                 "run": self.tool_delegate,
             }
         return tools
+
+    def native_tools(self):
+        """Convert the internal schema strings into OpenAI tool definitions.
+
+        Upstream only ever described tools in prose inside the prompt and let
+        the model retype them as `<tool>` text. Emitting a real JSON schema
+        moves both the selection and the argument shape under the endpoint's
+        control, which is where it belongs.
+        """
+        definitions = []
+        for name, tool in self.build_tools().items():
+            properties = {}
+            required = []
+            for arg, spec in tool["schema"].items():
+                kind, separator, _default = str(spec).partition("=")
+                kind = kind.strip() or "str"
+                properties[arg] = {"type": "integer" if kind == "int" else "string"}
+                if not separator:
+                    required.append(arg)
+            parameters = {"type": "object", "properties": properties}
+            if required:
+                parameters["required"] = required
+            definitions.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": tool["description"],
+                        "parameters": parameters,
+                    },
+                }
+            )
+        return definitions
 
     ############################################
     #### 2) Prompt Shape And Cache Reuse #######
@@ -442,19 +619,93 @@ class MiniAgent:
         note = f"{name}: {clip(str(result).replace(chr(10), ' '), 220)}"
         self.remember(memory["notes"], note, 5)
 
+    def complete_answer(self, prompt):
+        """Ask for the final answer, and keep asking if the answer was cut off.
+
+        Tool-call turns are short, so one token budget served the whole loop.
+        The closing turn is different: a multi-hop question needs a paragraph,
+        and at 512 tokens the model ran out mid-sentence — T10 stopped at
+        "调用 `json.load" and never reached the retry branch it had found. The
+        answer was right and unreadable, which scored as a miss.
+
+        Retrying only when the backend reports `finish_reason == "length"` keeps
+        the common case at one call. The doubling is bounded so a model that
+        rambles cannot loop.
+        """
+        budget = max(self.max_new_tokens, ANSWER_TOKEN_FLOOR)
+        attempt = 0
+        while True:
+            attempt += 1
+            raw = self.model_client.complete(prompt, budget, tools=None)
+            finish = getattr(self.model_client, "last_finish_reason", None)
+            if finish != "length" or attempt >= ANSWER_MAX_ATTEMPTS:
+                return raw
+            budget *= 2
+
     def ask(self, user_message):
         memory = self.session["memory"]
         if not memory["task"]:
             memory["task"] = clip(user_message.strip(), 300)
         self.record({"role": "user", "content": user_message, "created_at": now()})
 
+        native_mode = getattr(self.model_client, "supports_native_tools", False)
         tool_steps = 0
         attempts = 0
         max_attempts = max(self.max_steps * 3, self.max_steps + 4)
 
-        while tool_steps < self.max_steps and attempts < max_attempts:
+        while attempts < max_attempts:
             attempts += 1
-            raw = self.model_client.complete(self.prompt(user_message), self.max_new_tokens)
+
+            # Both transports have to be forced shut, not just the native one.
+            # Dropping the `tools` parameter is the strongest signal, but the
+            # text protocol has no such channel, so there the closing
+            # instruction is all that is left to carry it.
+            force_answer = tool_steps >= self.max_steps
+            prompt = self.prompt(user_message)
+            if force_answer:
+                prompt = prompt + "\n\n" + FORCE_ANSWER_NOTE
+                raw = self.complete_answer(prompt)
+            elif native_mode:
+                raw = self.model_client.complete(
+                    prompt, self.max_new_tokens, tools=self.native_tools()
+                )
+            else:
+                raw = self.model_client.complete(prompt, self.max_new_tokens)
+
+            if force_answer:
+                final = (raw or "").strip()
+                if self.parse(final)[0] in ("tool", "retry"):
+                    final = "（工具调用额度已用尽，模型仍在请求工具；请把问题问得更具体一些）"
+                if not final:
+                    final = "（模型在工具额度用尽后没有给出可用回答）"
+                self.record({"role": "assistant", "content": final, "created_at": now()})
+                return final
+
+            native_calls = getattr(self.model_client, "last_tool_calls", None) if native_mode else None
+            if native_calls:
+                for call in native_calls:
+                    if tool_steps >= self.max_steps:
+                        break
+                    function = call.get("function", {}) or {}
+                    name = function.get("name", "")
+                    try:
+                        args = json.loads(function.get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    tool_steps += 1
+                    result = self.run_tool(name, args)
+                    self.record(
+                        {
+                            "role": "tool",
+                            "name": name,
+                            "args": args,
+                            "content": result,
+                            "created_at": now(),
+                        }
+                    )
+                    self.note_tool(name, args, result)
+                continue
+
             kind, payload = self.parse(raw)
 
             if kind == "tool":
@@ -766,11 +1017,40 @@ class MiniAgent:
         return f"# {path.relative_to(self.root)}\n{body}"
 
     def tool_search(self, args):
+        """Exact search, semantic search, or exact-then-semantic.
+
+        `auto` exists because the two modes fail on different inputs: a symbol
+        name wants rg, a paraphrased question wants embeddings, and the caller
+        usually cannot tell which it has. Exact matching is tried first when it
+        can plausibly work (literal pattern, not a Chinese sentence), so the
+        cheap path stays cheap; an empty result escalates to the index.
+
+        The fallback is not cosmetic. On the measured task set, a Chinese
+        question about a numeric limit produced `(no matches)` from rg and the
+        agent then burned its whole step budget. Semantic ranking is the only
+        reason such questions are answerable at all.
+        """
         pattern = str(args.get("pattern", "")).strip()
         if not pattern:
             raise ValueError("pattern must not be empty")
+        mode = str(args.get("mode", "auto")).strip().lower() or "auto"
+        if mode not in ("auto", "keyword", "semantic"):
+            raise ValueError("mode must be one of auto, keyword, semantic")
         path = self.path(args.get("path", "."))
 
+        if mode == "keyword":
+            return self.keyword_search(pattern, path)
+        if mode == "semantic":
+            return self.semantic_search(pattern, path) or "(no matches)"
+
+        if looks_like_literal(pattern) and not has_cjk(pattern):
+            exact = self.keyword_search(pattern, path)
+            if exact != "(no matches)":
+                return exact
+            return self.semantic_search(pattern, path, escalated=True) or exact
+        return self.semantic_search(pattern, path) or self.keyword_search(pattern, path)
+
+    def keyword_search(self, pattern, path):
         if shutil.which("rg"):
             result = subprocess.run(
                 ["rg", "-n", "--smart-case", "--max-count", "200", pattern, str(path)],
@@ -792,6 +1072,34 @@ class MiniAgent:
                     if len(matches) >= 200:
                         return "\n".join(matches)
         return "\n".join(matches) or "(no matches)"
+
+    def semantic_search(self, pattern, path, escalated=False):
+        """Rank chunks by meaning. Returns "" when the index is unavailable.
+
+        A failed index degrades to keyword search instead of raising: the agent
+        can still work on a repo with no API key, it just loses paraphrases.
+        """
+        try:
+            index = self.code_index
+            index.build()
+            results = index.search(pattern, top_k=SEARCH_TOP_K)
+        except SemanticSearchError as error:
+            note = f"(semantic index unavailable: {error}; showing keyword matches)"
+            return f"{note}\n{self.keyword_search(pattern, path)}"
+        if path != self.root:
+            try:
+                filter_prefix = path.relative_to(self.root).as_posix()
+            except ValueError:
+                filter_prefix = None
+            if filter_prefix:
+                index_results = [r for r in results if r[0].path.startswith(filter_prefix)]
+                if index_results:
+                    results = index_results
+        if not results:
+            return ""
+        reason = "关键词无命中，已改用语义检索" if escalated else "语义检索"
+        header = f"# {reason}「{pattern}」，按相关性排序（{len(results)} 段）"
+        return header + "\n\n" + format_hits(results, pattern)
 
     def tool_run_shell(self, args):
         command = str(args.get("command", "")).strip()
@@ -909,16 +1217,50 @@ def build_welcome(agent, model, host):
     return "\n".join([line, *rows, line])
 
 
+OLLAMA_DEFAULT_MODEL = "qwen2.5:3b"
+OPENAI_DEFAULT_MODEL = "deepseek-v4.1-flash"
+
+
+def build_model_client(args):
+    """Pick the transport for the loop, which only needs .complete(prompt, n)."""
+    if args.provider == "openai":
+        base_url = args.base_url or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+        api_key = args.api_key or os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            raise SystemExit("缺少 API Key：请设置 OPENAI_API_KEY，或用 --api-key 传入。")
+        model_name = args.model or os.environ.get("OPENAI_MODEL") or OPENAI_DEFAULT_MODEL
+        args.endpoint = base_url
+        return (
+            OpenAICompatibleModelClient(
+                model=model_name,
+                base_url=base_url,
+                api_key=api_key,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                timeout=args.ollama_timeout,
+            ),
+            model_name,
+        )
+
+    model_name = args.model or OLLAMA_DEFAULT_MODEL
+    args.endpoint = args.host
+    return (
+        OllamaModelClient(
+            model=model_name,
+            host=args.host,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            timeout=args.ollama_timeout,
+        ),
+        model_name,
+    )
+
+
 def build_agent(args):
     workspace = WorkspaceContext.build(args.cwd)
     store = SessionStore(Path(workspace.repo_root) / ".mini-coding-agent" / "sessions")
-    model = OllamaModelClient(
-        model=args.model,
-        host=args.host,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        timeout=args.ollama_timeout,
-    )
+    model, model_name = build_model_client(args)
+    args.model = model_name
     session_id = args.resume
     if session_id == "latest":
         session_id = store.latest()
@@ -945,13 +1287,29 @@ def build_agent(args):
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="Minimal coding agent for Ollama models.",
+        description="Minimal coding agent for Ollama or OpenAI-compatible models.",
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
-    parser.add_argument("--model", default="qwen3.5:4b", help="Ollama model name.")
+    parser.add_argument(
+        "--provider",
+        choices=("ollama", "openai"),
+        default="ollama",
+        help="Model backend: local Ollama, or any OpenAI-compatible /chat/completions endpoint.",
+    )
+    parser.add_argument("--model", default=None, help="Model name; defaults per provider.")
     parser.add_argument("--host", default="http://127.0.0.1:11434", help="Ollama server URL.")
-    parser.add_argument("--ollama-timeout", type=int, default=300, help="Ollama request timeout in seconds.")
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="OpenAI-compatible base URL; falls back to OPENAI_BASE_URL.",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help="API key for the OpenAI-compatible backend; falls back to OPENAI_API_KEY.",
+    )
+    parser.add_argument("--ollama-timeout", type=int, default=300, help="Model request timeout in seconds.")
     parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
     parser.add_argument(
         "--approval",
@@ -961,16 +1319,17 @@ def build_arg_parser():
     )
     parser.add_argument("--max-steps", type=int, default=6, help="Maximum tool/model iterations per request.")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
-    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to Ollama.")
-    parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value sent to Ollama.")
+    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to the model.")
+    parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value sent to the model.")
     return parser
 
 
 def main(argv=None):
+    load_env_file(Path(__file__).with_name(".env"))
     args = build_arg_parser().parse_args(argv)
     agent = build_agent(args)
 
-    print(build_welcome(agent, model=args.model, host=args.host))
+    print(build_welcome(agent, model=args.model, host=args.endpoint))
 
     if args.prompt:
         prompt = " ".join(args.prompt).strip()
