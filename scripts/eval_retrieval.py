@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import mini_coding_agent as mca  # noqa: E402
-from code_index import CodeIndex, tokenize, _normalize, RRF_K, W_VECTOR, W_KEYWORD  # noqa: E402
+from code_index import CodeIndex, tokenize, _normalize  # noqa: E402
 
 TOP_K = 5
 # A boundary cut can leave the answer line one line outside a chunk; +-3 is fair.
