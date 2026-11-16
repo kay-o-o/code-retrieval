@@ -1,5 +1,7 @@
 # mini-coding-agent 检索改造
 
+[![CI](https://github.com/kay-o-o/mini-coding-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/kay-o-o/mini-coding-agent/actions/workflows/ci.yml)
+
 把一个 1000 行的开源 coding agent 的检索层整个重写，端到端任务成功率 **2/10 → 10/10**。
 
 > 本仓库是 [`rasbt/mini-coding-agent`](https://github.com/rasbt/mini-coding-agent) 的改造分支，**不是原创项目**。
@@ -135,6 +137,7 @@ python mini_coding_agent.py --provider openai
 跑评测：
 
 ```bash
+python -m pytest -q                                  # 上游单测，18 passed / 1 skipped
 python scripts/eval_baseline.py --provider openai   # 端到端，10 题，约 95 秒
 python scripts/eval_retrieval.py                    # 检索单测，11 条，约 20 秒
 ```
