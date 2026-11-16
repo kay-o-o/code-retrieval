@@ -1,252 +1,186 @@
-&nbsp;
-# Mini-Coding-Agent
+# mini-coding-agent 检索改造
 
-This folder contains a small standalone coding agent:
+把一个 1000 行的开源 coding agent 的检索层整个重写，端到端任务成功率 **2/10 → 10/10**。
 
-- code: `mini_coding_agent.py`
-- CLI: `mini-coding-agent`
-
-It is a minimal local agent loop with:
-
-- workspace snapshot collection
-- stable prompt plus turn state
-- structured tools
-- approval handling for risky tools
-- transcript and memory persistence
-- bounded delegation
-
-The model backend is currently based on Ollama.
-
-<a href="https://magazine.sebastianraschka.com/p/components-of-a-coding-agent">
-  <img src="https://substack-post-media.s3.amazonaws.com/public/images/49b97718-57f4-4977-99c8-8ad5c4d32af3_1548x862.png" width="500px">
-</a>
-
-<br>
-
-**[The detailed tutorial: Components of a Coding Agent](https://magazine.sebastianraschka.com/p/components-of-a-coding-agent)**
-
+> 本仓库是 [`rasbt/mini-coding-agent`](https://github.com/rasbt/mini-coding-agent) 的改造分支，**不是原创项目**。
+> 上游以 Apache-2.0 发布，本仓库沿用同一许可证。改了哪些文件见 [NOTICE](NOTICE)，
+> 逐轮排查的完整过程见 [docs/改造记录.md](docs/改造记录.md)。
 
 &nbsp;
-## Six Core Components
 
-<a href="https://magazine.sebastianraschka.com/p/components-of-a-coding-agent">
-  <img alt="Six core components of a coding agent" src="https://sebastianraschka.com/images/github/mini-coding-agent/six-components.webp" width="500px">
-</a>
+## 结论先说
 
-This coding harness is organized around six practical building blocks:
+上游的 `search` 工具是一行子串匹配。中文提问碰上英文标识符，永远 0 命中，模型于是反复换词重搜，把步数烧完。
 
-1. **Live repo context**  
-   The agent collects stable workspace facts upfront, such as repo layout, instructions, and git state.
-2. **Prompt shape and cache reuse**  
-   A stable prompt prefix, which is separate from the changing request, transcript, and memory so repeated model calls can reuse the static parts efficiently.
-3. **Structured tools, validation, and permissions**  
-   The model works through named tools with checked inputs, workspace path validation, and approval gates instead of free-form arbitrary actions.
-4. **Context reduction and output management**  
-   Long outputs are clipped, repeated reads are deduplicated, and older transcript entries are compressed to keep prompt size under control.
-5. **Transcripts, memory, and resumption**  
-   The runtime keeps both a full durable transcript and a smaller working memory so sessions can be resumed while preserving important state via working memory.
-6. **Delegation and bounded subagents**  
-   Scoped subtasks can be delegated to helper agents that inherit enough context to help (but operate within limits).
+| 提问 | 期望答案 | 上游 `search` 返回 |
+|---|---|---|
+| 工具返回内容超过多少字符截断 | `MAX_TOOL_OUTPUT = 4000` | `(no matches)` |
+| `read_file` 一次最多读多少行 | `int=200` | `(no matches)` |
+
+把检索换成 BM25 + 向量 + 加权 RRF 之后，R@3 从 0 到 36.4%，端到端从 2/10 到 10/10。
 
 &nbsp;
-## Requirements
 
-You need:
+## 一、问题是怎么定位的
 
-- Python 3.10+
-- Ollama installed
-- an Ollama model pulled locally
+不是一上手就改检索。先量基线：10 道仓库内任务，**过 2 道**，失败形态统一是
+`Stopped after reaching the step limit without a final answer`。
 
-Optional:
+看工具序列，失败任务几乎都是 `search, search, run_shell, search...` —— 它在搜，只是搜不到。
 
-- `uv` for environment management and the `mini-coding-agent` CLI entry point
+于是拆成两个问题分别量：
 
-This project has no Python runtime dependency beyond the standard library, so you can run it directly with `python mini_coding_agent.py` if you do not want to use `uv`.
+1. **模型到底有没有在调工具？** 看日志，输出里有结构化 `tool_calls`，但上游只解析 `<tool>` 文本标签，直接把整轮判成格式错误。
+2. **工具调了，为什么搜不到？** 命中率单测（11 条用例）：子串匹配 R@3 = 0%。
+
+两个问题都存在，前一个不修，后一个根本轮不到暴露。
 
 &nbsp;
-## Install Ollama
 
-Install Ollama on your machine so the `ollama` command is available in your shell.
+## 二、三轮改造
 
-Official installation link: [ollama.com/download](https://ollama.com/download)
+每一轮都是「量一个数 → 改 → 再量」，没有一次是凭感觉调的。
 
-Then verify:
+### 2.1 协议层：文本标签改原生 function calling
 
-```bash
-ollama --help
+上游用 prompt 教模型写字：给几个 `<tool>{...}</tool>` 例子，再用正则从回复正文里抓。这套约定在 2024 年的小模型上有效，现在的模型直接吐结构化 `tool_calls`，正则一个都抓不到。
+
+改法：`ModelClient` 增加 `tools` 参数，把上游那套字符串 schema（`"str='.'"`、`"int=1"`）翻译成标准 JSON Schema，走 `tool_calls` 通道；`ask()` 优先读结构化调用，没有才退回文本解析。
+
+**连带的坑**：文本协议有个副作用——模型只能输出 `<tool>` 或 `<final>`，**收口是被格式强制的**。换成原生调用后它能无限调工具，收口责任回到代码侧。实测接完原生通道仍只有 2/10，失败任务全是 `Stopped after reaching the step limit`。
+
+所以还要第二步：工具预算用完的那一轮**不再传 `tools` 参数**，只追加一句「预算已尽，用你已有的信息作答」。不传 tools 比在 prompt 里写「请停止调用工具」有效得多——后者只是建议，前者拿掉了选项。
+
+7/10。
+
+### 2.2 检索层：grep 换成混合检索
+
+新增 `code_index.py`（568 行，零第三方依赖，`urllib` 发请求、`math` 算余弦），三件事：
+
+**切块** —— 按空行切，26 行左右，带 6 行重叠。首次切分从中点找空行，会把函数切碎、把答案挤出 top-3，改成从 2/3 处开始找。
+
+**两路排序** —— BM25（英文标识符 + 中文 unigram/bigram）负责符号名，向量（`text-embedding-v3`，1024 维）负责换个说法的问句，两路各出一份排名。
+
+**上下文头** —— 代码块有个天然弱点：`MAX_TOOL_OUTPUT = 4000` 这一行本身没有语义，换个语言问就匹配不上。给每块补一行头再送去向量化：
+
+```
+文件 mini_coding_agent.py › def clip
 ```
 
-Start the server:
+有个连环坑：因为带 6 行重叠，块开头常常是上一个函数的尾巴。`read_file` 的 schema 块开头是 `def remember` 的残余，上下文头就写成了 `def remember`——问「read_file 最多读多少行」时这块连 top-5 都进不去。改成列出块内覆盖的**所有**符号才修好。
 
-```bash
-ollama serve
-```
+**两个调参决定，都和直觉相反：**
 
-In another terminal, pull a model. Example:
+- **RRF 的 k 不能照抄论文。** k=60 来自 web 规模语料，这里整个仓库只切出一百多个代码块，`1/(60+rank)` 把所有名次压成几乎一样的权重，等于没融合。在 11 条用例上重扫：**k=10 + 0.8/0.2（向量/关键词）得 R@3 36.4% / MRR 0.276，k=3 + 0.5/0.5 只有 27.3% / 0.200**。最终配置是前者。
+- **定义要排在提及前面。** 两路排序有共同偏见：提到某个标识符的块，排在定义它的块前面。查 `tool_write_file`，两路返回的都是工具 schema 里列出这个名字的条目，真正该看的 `def tool_write_file` 在后面。人 grepping 会直接跳定义，排序器也该有这个先验——加一条规则：块内出现 `def X` / `class X` / `X =` 这类定义行就加分。R@1 从 9.1% 翻到 18.2%。
 
-```bash
-ollama pull qwen3.5:4b
-```
+8/10 → 9/10 → 10/10。
 
-Qwen 3.5 model library:
+### 2.3 作答预算：被截断也算失败
 
-- [ollama.com/library/qwen3.5](https://ollama.com/library/qwen3.5)
+最后一道题失败形态变了：模型已经找到 `parse` 和主循环两条路径，回答却在半句上断掉——被 512 的 `max_new_tokens` 截了。工具调用轮输出很短，512 够用；只有最终作答需要成段输出。给作答轮单独设下限（1024），并在 `finish_reason == "length"` 时翻倍重试一次。
 
-The default in this project is `qwen3.5:4b`. If you have sufficient memory, it is worth trying a larger model such as `qwen3.5:9b` or another larger Qwen 3.5 variant. The agent just sends prompts to Ollama's `/api/generate` endpoint.
+10/10。
 
 &nbsp;
-## Project Setup
 
-Clone the repo or your fork and change into it:
+## 三、效果
+
+端到端（10 题，`max_steps=6`，deepseek-v4.1-flash）：
+
+| 阶段 | 通过 | 平均步数 | 平均 token |
+|---|---|---|---|
+| 上游原样 | 2/10 (20%) | 5.3 | 9,309 |
+| + 原生 function calling | 2/10 (20%) | 5.4 | — |
+| + 强制收口 | 7/10 (70%) | 5.0 | 10,393 |
+| + 语义检索 | 8/10 (80%) | 5.1 | 12,388 |
+| + 上下文头修正 | 9/10 (90%) | 4.5 | 10,759 |
+| + 定义优先 & 作答预算 | **10/10 (100%)** | 5.0 | 12,658 |
+
+单题平均 9.5 秒，全套约 95 秒。
+
+检索单测（11 条用例，top_k=5）：
+
+| 方式 | R@1 | R@3 | R@5 | MRR |
+|---|---|---|---|---|
+| 子串匹配（上游行为） | 0.0% | 0.0% | 0.0% | 0.000 |
+| BM25 单路 | 18.2% | 18.2% | 27.3% | 0.205 |
+| 向量单路 | 9.1% | 36.4% | 45.5% | 0.250 |
+| **混合（最终配置）** | **18.2%** | **36.4%** | **54.5%** | **0.294** |
+
+混合在四个指标上都不低于任一单路。
+
+&nbsp;
+
+## 四、跑起来
 
 ```bash
-git clone https://github.com/rasbt/mini-coding-agent.git
+git clone https://github.com/kay-o-o/mini-coding-agent.git
 cd mini-coding-agent
 ```
 
-If you forked it first, use your fork URL instead:
+运行时零第三方依赖，Python 3.10+ 直接跑：
 
 ```bash
-git clone https://github.com/<your-github-user>/mini-coding-agent.git
-cd mini-coding-agent
-```
-
-
-
-&nbsp;
-## Basic Usage
-
-Start the agent:
-
-```bash
-cd mini-coding-agent
-uv run mini-coding-agent
-```
-
-Without `uv`, run the script directly:
-
-```bash
-cd mini-coding-agent
+# 本地 Ollama（默认后端）
+ollama serve &
+ollama pull qwen2.5:3b
 python mini_coding_agent.py
+
+# 任意 OpenAI 兼容端点（评测用的就是这条）
+cp .env.example .env        # 填 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL
+python mini_coding_agent.py --provider openai
 ```
 
-By default it uses:
-
-- model: `qwen3.5:4b`
-- approval: `ask`
-
-For a concrete usage example, see [EXAMPLE.md](EXAMPLE.md).
-
-&nbsp;
-## Approval Modes
-
-Risky tools such as shell commands and file writes are gated by approval.
-
-- `--approval ask`
-  prompts before risky actions (default and recommended)
-- `--approval auto`
-  allows risky actions automatically, including arbitrary command execution and file writes by the model; use only with trusted prompts and trusted repositories
-- `--approval never`
-  denies risky actions
-
-Example:
+跑评测：
 
 ```bash
-uv run mini-coding-agent --approval auto
+python scripts/eval_baseline.py --provider openai   # 端到端，10 题，约 95 秒
+python scripts/eval_retrieval.py                    # 检索单测，11 条，约 20 秒
 ```
 
-
+> `--approval` 默认 `ask`，写文件和跑 shell 前会问你。
+> `--approval auto` 会放开任意命令执行与文件写入，只在可信仓库里用。
 
 &nbsp;
-## Resume Sessions
 
-The agent saves sessions under the target workspace root in:
+## 五、这组数字的边界
 
-```text
-.mini-coding-agent/sessions/
-```
+写在前面，比被人问出来好：
 
-Resume the latest session:
+1. **10 道题是我自己出的，且都在仓库内。** 100% 说明「这类问题上这套改动有效」，不说明「通用代码问答达到 100%」。有说服力的是 20% → 100% 的幅度，不是终值。
+2. **R@3 36.4% 不算高，但和端到端 100% 不矛盾。** agent 是多跳的：搜一次不全中，读一次文件就补上了。检索指标衡量「一次找对」，不是「最终答对」。
+3. **11 条用例不足以支撑精细调参。** 权重和 k 是在同一批用例上选的，有过拟合风险，要更硬需要另建 holdout。
+4. **没测过的**：`run_shell` 的风险分级、`delegate` 在深层任务上的表现、超过 50 个文件的大仓库。
 
-```bash
-uv run mini-coding-agent --resume latest
-```
+还有一件事值得单独说，因为它决定上面所有数字可不可信：
 
+> **评测本身修了三次，三次都是「量错了」，不是代码错了。**
+> ① 第一版把 10 道题内联在评测脚本里，脚本自己被索引，「题目」和「语料」语义完全一致，BM25 直接排第一——模型读的是评测脚本，不是源码。
+> ② 检索用例的 gold 存的是 `path:line`，源码涨了 300 行之后行号全错位，脚本不报错，11 条用例全部悄悄失效，读出一个 18.2% 的假提升。
+> ③ 评测脚本里复制了一份 RRF 融合逻辑，但漏了生产代码里的精确加分——表里的数字不是模型实际看到的排序。
 
-Resume a specific session:
-
-```bash
-uv run mini-coding-agent --resume 20260401-144025-2dd0aa
-```
-
+细节见 [docs/改造记录.md](docs/改造记录.md) 第三节。
 
 &nbsp;
-## Interactive Commands
 
-Inside the REPL, slash commands are handled directly by the agent instead of
-being sent to the model as a normal task.
+## 六、目录
 
-- `/help`
-  shows the list of available interactive commands
-- `/memory`
-  prints the distilled session memory, including the current task, tracked files, and notes
-- `/session`
-  prints the path to the current saved session JSON file
-- `/reset`
-  clears the current session history and distilled memory but keeps you in the REPL
-- `/exit`
-  exits the interactive session
-- `/quit`
-  exits the interactive session; alias for `/exit`
-
-&nbsp;
-## Main CLI Flags
-
-```bash
-uv run mini-coding-agent --help
+```
+mini_coding_agent.py      主程序，1,378 行（上游 1,019 行）
+code_index.py             代码索引与混合检索，568 行，新增
+scripts/eval_baseline.py  端到端评测，158 行
+scripts/eval_retrieval.py 检索单测，195 行
+eval/tasks.json           10 道端到端题
+eval/retrieval_cases.json 11 条检索用例（gold 存锚点字符串，不存行号）
+docs/改造记录.md           完整排查过程与全部中间数据
+EXAMPLE.md                上游的交互示例（Ollama）
+NOTICE                    上游版权声明与本仓库修改说明
 ```
 
-Without `uv`:
-
-```bash
-python mini_coding_agent.py --help
-```
-
-CLI flags are passed before the agent starts. Use them to choose the workspace,
-model connection, resume behavior, approval mode, and generation limits.
-
-Important flags:
-
-- `--cwd`
-  sets the workspace directory the agent should inspect and modify; default: `.`
-- `--model`
-  selects the Ollama model name, such as `qwen3.5:4b`; default: `qwen3.5:4b`
-- `--host`
-  points the agent at the Ollama server URL (usually not needed); default: `http://127.0.0.1:11434`
-- `--ollama-timeout`
-  controls how long the client waits for an Ollama response (usually not needed); default: `300` seconds
-- `--resume`
-  resumes a saved session by id or uses `latest`; default: start a new session
-- `--approval`
-  controls how risky tools are handled: `ask`, `auto`, or `never`; default: `ask`
-- `--max-steps`
-  limits how many model and tool turns are allowed for one user request; default: `6`
-- `--max-new-tokens`
-  caps the model output length for each step; default: `512`
-- `--temperature`
-  controls sampling randomness; default: `0.2`
-- `--top-p`
-  controls nucleus sampling for generation; default: `0.9`
-
 &nbsp;
-## Example
 
-See [EXAMPLE.md](EXAMPLE.md)
+## 七、许可
 
-&nbsp;
-## Notes & Tips
-
-- The agent expects the model to emit either `<tool>...</tool>` or `<final>...</final>`.
-- Different Ollama models will follow those instructions with different reliability.
-- If the model does not follow the format well, use a stronger instruction-following model.
-- The agent is intentionally small and optimized for readability, not robustness.
+Apache License 2.0，见 [LICENSE](LICENSE)。
+上游版权归 [Sebastian Raschka](https://github.com/rasbt) 所有，本仓库修改部分的说明见 [NOTICE](NOTICE)。

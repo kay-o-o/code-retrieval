@@ -33,3 +33,20 @@ tmp/
 
 # OS files
 .DS_Store
+
+# ---- 以下为本仓库新增（上游未覆盖）----
+
+# 凭据：绝不入库
+.env
+.env.*
+!.env.example
+
+# 检索索引缓存
+code_index.cache.json
+
+# 编辑器
+.vscode/
+.idea/
+
+# 简历与面试准备笔记，不随代码公开
+docs/简历条目.md

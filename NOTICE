@@ -1,0 +1,48 @@
+mini-coding-agent 检索改造
+Copyright 2026 本仓库作者
+
+本作品基于以下开源项目修改而来：
+
+  mini-coding-agent
+  Copyright 2025 Sebastian Raschka
+  https://github.com/rasbt/mini-coding-agent
+  Licensed under the Apache License, Version 2.0
+
+  上游以 Apache License 2.0 发布，本仓库沿用同一许可证（见 LICENSE），
+  并保留上述版权声明与出处。
+
+------------------------------------------------------------
+
+修改说明（对应 Apache-2.0 第 4(b) 条「修改过的文件需显著标注」）
+
+新增文件
+  code_index.py              代码索引与混合检索模块（BM25 + 向量 + 加权 RRF）
+  scripts/eval_baseline.py   端到端任务成功率评测
+  scripts/eval_retrieval.py  检索质量单测（R@1 / R@3 / R@5 / MRR）
+  eval/tasks.json            10 道端到端评测题
+  eval/retrieval_cases.json  11 条检索用例（gold 存锚点字符串，不存行号）
+  docs/改造记录.md            逐轮改造的现象、定位、改法与实测数据
+  NOTICE                     本文件
+  .env.example               列出需要配置的环境变量名（不含真实值）
+
+修改文件
+  mini_coding_agent.py       1,019 行 → 1,378 行。改动集中在四处：
+                             · ModelClient 增加 tools 参数，走原生 tool_calls 通道
+                             · 工具预算耗尽轮不再下发 tools，强制作答收口
+                             · search 工具改为调用 code_index.CodeIndex
+                             · 作答轮单独设输出下限，finish_reason=length 时翻倍重试
+  README.md                  重写为中文，说明改造动机、改法与实测数据
+  pyproject.toml             把新增的 code_index 加入打包模块；移除运行时第三方依赖声明
+                             （改写后仅依赖标准库，pytest 仍在 dev 组）
+  .gitignore                 在原基础上追加 .env、索引缓存、编辑器目录等条目
+
+未修改的文件
+  LICENSE                    原样保留，未作任何改动
+  tests/                     上游单测原样保留，在本仓库代码上 18 passed / 1 skipped
+  EXAMPLE.md                 原样保留
+
+未修改的部分沿用上游实现，包括工作区快照、审批门、会话持久化与子智能体委派。
+
+------------------------------------------------------------
+
+上游 README 与教程版权归 Sebastian Raschka 所有，本仓库未对其主张任何权利。
